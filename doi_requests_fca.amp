@@ -1,0 +1,244 @@
+<script runat="server">
+  Platform.Load("Core","1");
+  HTTPHeader.SetValue("Access-Control-Allow-Origin","*");
+  HTTPHeader.SetValue("Access-Control-Allow-Headers","Origin, X-Requested-With, Content-Type, Accept");
+  try {
+</script>
+%%[ 
+
+/* Set needed variables to be received from LV  */
+set @Email                  =       RequestParameter("email")
+set @FirstName              =       RequestParameter("FirstName")
+set @LastName               =       RequestParameter("LastName")
+set @Salutation             =       RequestParameter("Salutation")
+set @Source                 =       RequestParameter("Source")    
+set @Debug                  =       RequestParameter("debug")   
+set @Auth                   =       RequestParameter("auth")
+
+
+/* Dynamic secret: Hash of Concat (email + (Day - Year + Month) + Secret) */
+set @Email                  =       lowercase(@email)
+set @Key                    =       "to be defined"
+set @SystemDate             =       Now(1)
+set @LocalDate              =       SystemDateToLocalDate(@systemDate)
+set @Year                   =       datePart(@localDate, "Y")
+set @Month                  =       datePart(@localDate, "M")
+set @Day                    =       datePart(@localDate, "D")
+set @Datesum1               =       Subtract(@year,@day)
+set @Datesum                =       Add(@datesum1,@month)
+set @Secret1                =       concat(@email,@datesum,@key)
+set @Secret                 =       SHA1(@secret1)
+set @ExtSecret              =       RequestParameter("s")
+
+
+
+/* Process contact pushed to Web Service */
+if not empty(@Email) and (@ExtSecret == @Auth) then  
+
+
+/*  1) Check if DOI request already pending */
+
+    set @requestPending     =       LookUp("DOIRequests","Email","Email",@email)
+
+
+/*  2a) Check DOI status OPTION A - Check in MC */
+
+    set @DoubleOptInStatus  =       LookUp("MasterData","DoiStatus","Email",@email)
+
+
+/*  2b) Check DOI status OPTION B - Check in SC */
+
+
+    set @retrievecontactinformation = RetrieveSalesforceObjects("Contact","Id,DoiStatus__c","Email", "=", @email) 
+    set @retrievecontactinformationrows = RowCount(@retrievecontactinformation)
+    
+    if @retrievecontactinformationrows == 1 then 
+          set @subscriberrow = Row(@retrievecontactinformation, 1)
+          set @DoiStatus__c  = Field(@subscriberRow, "DoiStatus__c")
+          set @SFID          = Field(@subscriberRow, "id")
+    endif
+
+
+/*  3) Define if DOI already existing */
+
+    if @DoubleOptInStatus == "confirmed" then    
+        
+        set @DoubleOptInAlready =       "true"
+        set @status             =       '8' 
+
+    endif    
+
+
+/*  3) Add to DOIRequests Data Extension */
+
+    if empty(@requestPending) and @DoubleOptInAlreday != "true" then 
+
+            set @requestedOptIn =       UpsertData
+
+                                        (
+                                            "DOIRequests",           1,
+                                            "Email",                 @Email,
+                                            "FirstName",             @FirstName,
+                                            "LastName",              @LastName,
+                                            "Salutation",            @Salutation,
+                                            "Source",                @Source, 
+                                        )
+       
+            if @requestedOptIn  == 0 THEN 
+                @status             =       '7' 
+                @statusmessage      =       'error adding to DOIRequests' 
+            else 
+                @status             =       '6' 
+                @statusmessage      =       'added to DOIRequests' 
+            endif
+
+            if @status == "6" then
+
+                if not empty(@SFID) and indexOf(@id,"003") == 1 and Length(@id) == '18' THEN 
+                    set @sk = @id 
+                else  
+                    set @sk = @email
+                endif
+]%%  
+
+
+
+/*  4) DOI Journey starten */ 
+        
+                    
+            <script type="text/javascript" runat="server">
+                Platform.Load("Core", "1.1.5");
+                
+
+                try {
+
+                var accessToken;
+
+                // Get current Date and add 10 seconds for delays etc.
+                var date = Now();
+                var currentDate = new Date(date.getTime() + 1000 * 10);
+
+                // Search valid token in DE
+                var tokenDE = DataExtension.Init("APIToken");
+                var tokenFilter = {Property:'ExpiringDate',SimpleOperator:'greaterThan', Value: currentDate};
+                var tokenRows = tokenDE.Rows.Retrieve(tokenFilter);
+
+                // Use saved token
+                IF (tokenRows.length == 1) {
+                    accessToken = tokenRows[0].token;
+                    Variable.SetValue("@tokenResponse","200");
+                } 
+                // Get new token and save
+                ELSE  {
+                    var authUrl = 'https://mc2hmc2ww1pj3lxdsnrsxrxw0w60.auth.marketingcloudapis.com/';
+                    var contentType = 'application/json';
+                    var payload = '{"grant_type": "client_credentials", "client_id": "11dynn7bsfzepayyymka5yxe", "client_secret": "xTAmJsdGN7eBagT2ZIm4N1At", "scope": "email_write email_read email_send", "account_id": "510003699"}';
+
+                    var accessTokenResult = HTTP.Post(authUrl, contentType, payload);
+                    var accessTokenResponse = Platform.Function.ParseJSON(accessTokenResult.Response[0]);
+                    accessToken = accessTokenResponse.access_token;
+                    var expiresIn = accessTokenResponse.expires_in;
+                    var expiringDate = new Date(currentDate.getTime() + 1000 * expiresIn);
+                    // Write('<br>Token:' + accessToken);
+                    // Write('<br>Expires In:' + expiresIn);
+                    // Write('<br>ExpiringDate:' + expiringDate);
+                    Variable.SetValue("@tokenResponse",accessTokenResult.StatusCode);
+                    tokenDE.Rows.Add({token:accessToken,ExpiringDate:expiringDate});
+
+                }     
+
+                IF (accessToken !== 'undefined' && accessToken != '') {
+
+                    var Authorization = 'Bearer ' + accessToken;
+                    var contentType = 'application/json;charset=utf-8';
+
+                    var url = 'https://mc2hmc2ww1pj3lxdsnrsxrxw0w60.rest.marketingcloudapis.com/messaging/v1/email/messages/';
+                    var payload = {
+                    definitionKey: "DOI",
+                    recipients:[
+                    {
+                    contactKey: Variable.GetValue("@sk"),
+                        to: Variable.GetValue("@email")
+                    }]
+                    }
+
+
+                    var req = new Script.Util.HttpRequest(url);
+                    req.emptyContentHandling = 0;
+                    req.retries = 2;
+                    req.continueOnError = true;
+                    req.contentType = contentType;
+                    req.setHeader("Authorization", Authorization);
+                    req.method = "POST"; 
+                    req.postData = Stringify(payload);
+                
+                    var resp = req.send();
+                    var respJSON = Platform.Function.ParseJSON(String(resp.content));
+                    var emailStatus = respJSON.status;
+                    //Write('<br>response: ' + Stringify(resp.content) + '<br>');
+                    Variable.SetValue("@emailResponse",resp.statusCode);
+                }
+                } catch (e) {
+                Write("<br>e: " + Stringify(e));
+                Variable.SetValue("@error",e);
+                }
+            </script>
+
+else 
+
+    set @statusCode         =       '9'
+    set @status             =       'access denied'
+
+endif
+
+<script type="text/javascript" runat="server">
+    } catch (ex) {
+        Variable.SetValue("@error", true)
+        Variable.SetValue("@errorMsg", Stringify(ex))
+    }
+</script>
+
+
+%%[ 
+If not empty (@error) then
+
+         @status             =       '5' 
+         @statusmessage      =       'Error' 
+
+endif
+
+
+if @status == '5' then
+
+  SET @statusupdate =    InsertData("DOILog",
+                                    "email", @email,
+                                    "id", @id,
+                                    "source", @source,
+                                    "status", @status,
+                                    "handler", "doi requests", 
+                                    "statusmessage", @statusmessage,
+                                    "timestamp", SystemDateToLocalDate(Now()))
+
+endif
+
+set @response = concat('{','"','response','"',':','{','"','code','"',':','"',@status,'"','}}')
+
+]%%
+
+
+%%=v(@response)=%%
+
+%%[ If not empty (@debug) then]%%
+
+<pre>        
+  v0.1
+    Error: %%=v(@error)=%%
+    email: %%=v(@email)=%%
+    id: %%=v(@id)=%%
+    sk: %%=v(@sk)=%%
+    firstname: %%=v(@firstname)=%%
+    lastname: %%=v(@lastname)=%%
+    auth status: %%=v(@tokenResponse)=%%
+    journey status: %%=v(@emailResponse)=%%
+</pre>
+%%[ endif ]%%
